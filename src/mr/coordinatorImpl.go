@@ -11,39 +11,35 @@ import (
 	"6.5840/logger"
 )
 
-type TaskQueue chan TaskInfo
-
-var (
-	tasks TaskQueue
-)
-
-const (
-	maxTasksPoolSize = 1024
-)
-
-var once sync.Once
-
 func (c *Coordinator) PushTask(args *FetchTaskRequest, reply *FetchTaskReponse) error {
 	// preparation
 	reply.TaskInfo = &TaskInfo{}
 	reply.WoderIndex = args.WoderIndex
-	logger.Info("master call push task now, worker %v",
+	reply.TaskInfo.NReduce = c.nReduce
+
+	logger.Infof("master nReduce is %v", c.nReduce)
+	logger.Infof("master call push task now, worker %v",
 		args.WoderIndex)
 
 	if args.WoderIndex == -1 {
-		workerIndexLock.Lock()
-		GlobalWorkerIndex += 1
-		reply.WoderIndex = GlobalWorkerIndex
-		workerIndexLock.Unlock()
-		logger.Info("Global index", GlobalWorkerIndex)
+		c.workerIndexLock.Lock()
+		c.globalWorkerIndex += 1
+		reply.WoderIndex = c.globalWorkerIndex
+		c.workerIndexLock.Unlock()
+		logger.Info("Global index", c.globalWorkerIndex)
 	}
 
+	c.tasksLock.Lock()
 	if len(c.GetPool()) == 0 {
 		reply.TaskInfo.TaskType = WaitTask
 	} else {
-		// TODO: push
-		reply.TaskInfo.TaskType = MapTask
+		reply.TaskInfo = <-c.GetPool()
 	}
+
+	// BUG
+	reply.TaskInfo.NReduce = c.nReduce
+	c.tasksLock.Unlock()
+
 	return nil
 }
 
@@ -72,11 +68,13 @@ func (c *Coordinator) Done() bool {
 }
 
 // get tasks pool
+var once sync.Once
+
 func (c *Coordinator) GetPool() TaskQueue {
-	if tasks == nil {
+	if c.tasks == nil {
 		once.Do(func() {
-			tasks = make(TaskQueue, maxTasksPoolSize)
+			c.tasks = make(TaskQueue, maxTasksPoolSize)
 		})
 	}
-	return tasks
+	return c.tasks
 }

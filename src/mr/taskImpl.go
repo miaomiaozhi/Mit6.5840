@@ -27,4 +27,5 @@ func init() {
 type TaskInfo struct {
 	TaskType TaskType
 	FileName string
+	NReduce  int
 }

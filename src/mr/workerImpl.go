@@ -1,9 +1,21 @@
 package mr
 
 import (
+	"encoding/json"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
 	"net/rpc"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
 
 	"6.5840/logger"
+)
+
+const (
+	mapTmpDir = "../mr/map"
 )
 
 func CallFetchTask() (*TaskInfo, error) {
@@ -24,12 +36,73 @@ func CallFetchTask() (*TaskInfo, error) {
 	}
 }
 
-func CallMapTask() error {
-	logger.Infof("Worker %v call map task", WorkerIndex)
+func HandleMapTask(taskInfo *TaskInfo,
+	mapf func(string, string) []KeyValue) error {
+	logger.Infof("Worker %v Handle map task", WorkerIndex)
+	if WorkerIndex == -1 {
+		logger.Errorf("handle map task error: WorkerIndex is INVALID. taskInfo: %v",
+			*taskInfo)
+		return nil
+	}
+
+	// get kva
+	filename := taskInfo.FileName
+	file, err := os.Open(filename)
+	if err != nil {
+		logger.Errorf("handle map task error: cannot open %v", filename)
+		return err
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+	}
+	file.Close()
+
+	tmpFileInMapTask := ""
+	kva := mapf(tmpFileInMapTask, string(content))
+
+	jsonData, err := json.Marshal(kva)
+	if err != nil {
+		logger.Errorf("handle map task error: marshal data failed %v", err)
+		return err
+	}
+
+	tmpFilePathPrefix := "mr-map-" + strconv.Itoa(WorkerIndex) + "-"
+	tmpFilePathPrefix = filepath.Join(mapTmpDir, tmpFilePathPrefix)
+
+	logger.Infof("handle map task, Worker %v tmp file path prefix is %v",
+		WorkerIndex, tmpFilePathPrefix)
+
+	nReduce := taskInfo.NReduce
+	logger.Infof("nReduce is %v", nReduce)
+	for i := 0; i < nReduce; i++ {
+		pwd, _ := os.Getwd()
+		logger.Debugf("pws %v", pwd)
+		tmpFilePath := tmpFilePathPrefix + strconv.Itoa(i) + ".txt"
+		file, err := os.Create(tmpFilePath)
+		if err != nil {
+			logger.Errorf("create file error %v", err)
+			return err
+		}
+		defer file.Close()
+
+		if err := os.WriteFile(tmpFilePath, jsonData, 0644); err != nil {
+			logger.Errorf("%v", err)
+			return err
+		}
+	}
+
 	return nil
 }
-func CallReduceTask() error {
-	logger.Infof("Worker %v call reduce task", WorkerIndex)
+func HandleReduceTask(taskInfo *TaskInfo,
+	reducef func(string, []string) string) error {
+	logger.Infof("Worker %v Handle reduce task", WorkerIndex)
+	return nil
+}
+
+func HandleWaitTask(taskInfo *TaskInfo) error {
+	logger.Infof("Worker %v Handle wait task", WorkerIndex)
+	time.Sleep(5 * time.Second)
 	return nil
 }
 
@@ -79,4 +152,12 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	logger.Errorf("handling RPC failed: %s", err.Error())
 	return false
+}
+
+// use ihash(key) % NReduce to choose the reduce
+// task number for each KeyValue emitted by Map.
+func ihash(key string) int {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return int(h.Sum32() & 0x7fffffff)
 }

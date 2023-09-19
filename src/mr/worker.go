@@ -1,9 +1,7 @@
 package mr
 
 import (
-	"hash/fnv"
 	"sync"
-	"time"
 
 	"6.5840/logger"
 )
@@ -12,14 +10,6 @@ import (
 type KeyValue struct {
 	Key   string
 	Value string
-}
-
-// use ihash(key) % NReduce to choose the reduce
-// task number for each KeyValue emitted by Map.
-func ihash(key string) int {
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	return int(h.Sum32() & 0x7fffffff)
 }
 
 var (
@@ -44,7 +34,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				wg.Done()
 				return
 			default:
-				work(stop)
+				work(stop, mapf, reducef)
 			}
 		}
 	}()
@@ -53,12 +43,15 @@ func Worker(mapf func(string, string) []KeyValue,
 	logger.Infof("Worder %v finish now!", WorkerIndex)
 }
 
-func work(stop chan bool) {
+func work(stop chan bool,
+	mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) {
 	taskInfo, err := CallFetchTask()
 	if err != nil {
 		logger.Errorf("Worker %v call fetch task failed: %v", WorkerIndex, err)
 		return
 	}
+	logger.Infof("task %v", *taskInfo)
 
 	taskType := taskInfo.TaskType
 
@@ -67,11 +60,11 @@ func work(stop chan bool) {
 	case FetchTask:
 		// do noting
 	case MapTask:
-		_ = CallMapTask()
+		_ = HandleMapTask(taskInfo, mapf)
 	case ReduceTask:
-		_ = CallReduceTask()
+		_ = HandleReduceTask(taskInfo, reducef)
 	case WaitTask:
-		time.Sleep(5 * time.Second)
+		_ = HandleWaitTask(taskInfo)
 	case EndTask:
 		logger.Infof("Worker %v finish!", WorkerIndex)
 		stop <- true
