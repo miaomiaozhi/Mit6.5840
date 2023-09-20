@@ -2,9 +2,9 @@ package mr
 
 import (
 	"encoding/json"
+	"errors"
 	"hash/fnv"
 	"io/ioutil"
-	"log"
 	"net/rpc"
 	"os"
 	"path/filepath"
@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	mapTmpDir = "../mr/map"
+	mapTmpDir = "./map"
 )
 
 func CallFetchTask() (*TaskInfo, error) {
@@ -35,6 +35,70 @@ func CallFetchTask() (*TaskInfo, error) {
 		return nil, nil
 	}
 }
+func CallFinishTask(taskInfo *TaskInfo, err error) {
+	statusCode := Success
+	if err != nil {
+		statusCode = Failed
+	}
+	args := MapRequest{
+		TaskInfo:   taskInfo,
+		StatusCode: statusCode,
+	}
+	reply := MapResponse{}
+	_ = call("Coordinator.FinishTask", &args, &reply)
+}
+
+// get kva
+func getKvaInMapTask(taskInfo *TaskInfo,
+	mapf func(string, string) []KeyValue) ([]KeyValue, error) {
+	filename := taskInfo.FileName
+	file, err := os.Open(filename)
+	if err != nil {
+		logger.Errorf("get kva in map task error: cannot open file. %v", filename)
+		return nil, err
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		logger.Errorf("get kva in map task error: read content failed. %v", filename)
+		return nil, err
+	}
+	file.Close()
+
+	kva := mapf(filename, string(content))
+	return kva, nil
+}
+
+func writeIntermediateToFile(index int, kva []KeyValue, result chan error) {
+	jsonData, err := json.Marshal(kva)
+	if err != nil {
+		logger.Errorf("handle %v map task error: marshal data failed %v",
+			index, err)
+		result <- err
+		return
+	}
+
+	filePathPrefix := "mr-map-" + strconv.Itoa(WorkerIndex) + "-"
+	filePathPrefix = filepath.Join(mapTmpDir, filePathPrefix)
+	filePathSuffix := ".txt"
+
+	filePath := filePathPrefix + strconv.Itoa(index) + filePathSuffix
+	file, err := os.Create(filePath)
+	if err != nil {
+		logger.Errorf("handle map task failed, worker (%v-%v): create file error %v",
+			WorkerIndex, index, err)
+		result <- err
+		return
+	}
+	defer file.Close()
+
+	if err := os.WriteFile(filePath, jsonData, 0644); err != nil {
+		logger.Errorf("handle map task failed, worker (%v-%v): write file error %v",
+			WorkerIndex, index, err)
+		result <- err
+		return
+	}
+	result <- nil
+}
 
 func HandleMapTask(taskInfo *TaskInfo,
 	mapf func(string, string) []KeyValue) error {
@@ -42,56 +106,36 @@ func HandleMapTask(taskInfo *TaskInfo,
 	if WorkerIndex == -1 {
 		logger.Errorf("handle map task error: WorkerIndex is INVALID. taskInfo: %v",
 			*taskInfo)
-		return nil
+		return errors.New("handle map task error: WorkerIndex is INVALID")
 	}
 
-	// get kva
-	filename := taskInfo.FileName
-	file, err := os.Open(filename)
+	kva, err := getKvaInMapTask(taskInfo, mapf)
 	if err != nil {
-		logger.Errorf("handle map task error: cannot open %v", filename)
+		logger.Errorf("handle map task error: %v", err)
 		return err
 	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filename)
-	}
-	file.Close()
-
-	tmpFileInMapTask := ""
-	kva := mapf(tmpFileInMapTask, string(content))
-
-	jsonData, err := json.Marshal(kva)
-	if err != nil {
-		logger.Errorf("handle map task error: marshal data failed %v", err)
-		return err
-	}
-
-	tmpFilePathPrefix := "mr-map-" + strconv.Itoa(WorkerIndex) + "-"
-	tmpFilePathPrefix = filepath.Join(mapTmpDir, tmpFilePathPrefix)
-
-	logger.Infof("handle map task, Worker %v tmp file path prefix is %v",
-		WorkerIndex, tmpFilePathPrefix)
 
 	nReduce := taskInfo.NReduce
-	logger.Infof("nReduce is %v", nReduce)
+	intermediate := make([][]KeyValue, nReduce)
 	for i := 0; i < nReduce; i++ {
-		pwd, _ := os.Getwd()
-		logger.Debugf("pws %v", pwd)
-		tmpFilePath := tmpFilePathPrefix + strconv.Itoa(i) + ".txt"
-		file, err := os.Create(tmpFilePath)
-		if err != nil {
-			logger.Errorf("create file error %v", err)
-			return err
-		}
-		defer file.Close()
+		intermediate[i] = make([]KeyValue, 0)
+	}
+	for _, kv := range kva {
+		key := kv.Key
+		intermediate[ihash(key)%nReduce] = append(intermediate[ihash(key)%nReduce], kv)
+	}
 
-		if err := os.WriteFile(tmpFilePath, jsonData, 0644); err != nil {
-			logger.Errorf("%v", err)
+	// write intermediate file to each file
+	for index := 0; index < nReduce; index++ {
+		result := make(chan error)
+		go writeIntermediateToFile(index, intermediate[index], result)
+		if err := <-result; err != nil {
+			logger.Errorf("handle map task error, worker(%v-%v), %v", WorkerIndex, index, err)
 			return err
 		}
 	}
 
+	logger.Infof("worker %v handle map task success!", WorkerIndex)
 	return nil
 }
 func HandleReduceTask(taskInfo *TaskInfo,

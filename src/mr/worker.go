@@ -40,7 +40,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	}()
 
 	wg.Wait()
-	logger.Infof("Worder %v finish now!", WorkerIndex)
 }
 
 func work(stop chan bool,
@@ -60,9 +59,11 @@ func work(stop chan bool,
 	case FetchTask:
 		// do noting
 	case MapTask:
-		_ = HandleMapTask(taskInfo, mapf)
+		err := HandleMapTask(taskInfo, mapf)
+		CallFinishTask(taskInfo, err)
 	case ReduceTask:
-		_ = HandleReduceTask(taskInfo, reducef)
+		err := HandleReduceTask(taskInfo, reducef)
+		CallFinishTask(taskInfo, err)
 	case WaitTask:
 		_ = HandleWaitTask(taskInfo)
 	case EndTask:

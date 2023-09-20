@@ -12,12 +12,15 @@ const (
 
 type Coordinator struct {
 	// Your definitions here.
-	tasks             TaskQueue
-	globalWorkerIndex int
-	nReduce           int
+	tasks               TaskQueue
+	globalWorkerIndex   int
+	nReduce             int
+	unImplMapTaskCnt    int
+	unImplReduceTaskCnt int
+	mapDone             bool
+	allDone             bool
 
-	workerIndexLock sync.Mutex
-	tasksLock       sync.Mutex
+	lock sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -37,9 +40,13 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 func MakeCoordinator(files []string, inReduce int) *Coordinator {
 	// do initialize
 	c := Coordinator{
-		tasks:             make(TaskQueue, maxTasksPoolSize),
-		globalWorkerIndex: -1,
-		nReduce:           inReduce,
+		tasks:               make(TaskQueue, maxTasksPoolSize),
+		globalWorkerIndex:   -1,
+		nReduce:             inReduce,
+		unImplMapTaskCnt:    len(files),
+		unImplReduceTaskCnt: inReduce,
+		mapDone:             false,
+		allDone:             false,
 	}
 
 	// Your code here.
@@ -48,6 +55,7 @@ func MakeCoordinator(files []string, inReduce int) *Coordinator {
 		c.tasks <- &TaskInfo{
 			TaskType: MapTask,
 			FileName: file,
+			NReduce:  inReduce,
 		}
 	}
 

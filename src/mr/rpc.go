@@ -45,6 +45,8 @@ type FetchTaskRequest struct {
 }
 type MapRequest struct {
 	BaseRequest
+	StatusCode int
+	TaskInfo   *TaskInfo
 }
 type ReduceRequest struct {
 	BaseRequest

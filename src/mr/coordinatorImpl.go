@@ -11,35 +11,89 @@ import (
 	"6.5840/logger"
 )
 
-func (c *Coordinator) PushTask(args *FetchTaskRequest, reply *FetchTaskReponse) error {
-	// preparation
+func (c *Coordinator) pushMapTask(args *FetchTaskRequest, reply *FetchTaskReponse) error {
+	// initailize
 	reply.TaskInfo = &TaskInfo{}
+
 	reply.WoderIndex = args.WoderIndex
-	reply.TaskInfo.NReduce = c.nReduce
-
-	logger.Infof("master nReduce is %v", c.nReduce)
-	logger.Infof("master call push task now, worker %v",
-		args.WoderIndex)
-
 	if args.WoderIndex == -1 {
-		c.workerIndexLock.Lock()
 		c.globalWorkerIndex += 1
 		reply.WoderIndex = c.globalWorkerIndex
-		c.workerIndexLock.Unlock()
-		logger.Info("Global index", c.globalWorkerIndex)
 	}
 
-	c.tasksLock.Lock()
 	if len(c.GetPool()) == 0 {
 		reply.TaskInfo.TaskType = WaitTask
 	} else {
 		reply.TaskInfo = <-c.GetPool()
 	}
 
-	// BUG
-	reply.TaskInfo.NReduce = c.nReduce
-	c.tasksLock.Unlock()
+	return nil
+}
 
+func (c *Coordinator) pushReduceTask(args *FetchTaskRequest, reply *FetchTaskReponse) error {
+	// initailize
+	reply.TaskInfo = &TaskInfo{}
+
+	reply.WoderIndex = args.WoderIndex
+	if args.WoderIndex == -1 {
+		c.globalWorkerIndex += 1
+		reply.WoderIndex = c.globalWorkerIndex
+	}
+
+	if len(c.GetPool()) == 0 {
+		reply.TaskInfo.TaskType = WaitTask
+	} else {
+		reply.TaskInfo = <-c.GetPool()
+	}
+
+	return nil
+}
+
+func (c *Coordinator) PushTask(args *FetchTaskRequest, reply *FetchTaskReponse) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	if c.allDone {
+		reply.TaskInfo.TaskType = EndTask
+		return nil
+	}
+
+	if !c.mapDone {
+		return c.pushMapTask(args, reply)
+	} else {
+		return c.pushReduceTask(args, reply)
+	}
+}
+
+func (c *Coordinator) FinishTask(args *MapRequest, reply *MapResponse) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	if args.StatusCode == Failed {
+		c.GetPool() <- args.TaskInfo
+		return nil
+	}
+
+	taskInfo := args.TaskInfo
+	switch taskInfo.TaskType {
+	case MapTask:
+		c.unImplMapTaskCnt -= 1
+		if c.unImplMapTaskCnt == 0 {
+			c.mapDone = true
+		}
+	case ReduceTask:
+		c.unImplReduceTaskCnt -= 1
+		if c.unImplReduceTaskCnt == 0 {
+			if !c.mapDone {
+				logger.Error("finish ALL task error, map tasks is not finished")
+				return nil
+			}
+			c.allDone = true
+		}
+	default:
+		logger.Errorf("finish task error, invalid task type %v call this rpc",
+			taskInfo.TaskType)
+	}
 	return nil
 }
 
@@ -63,13 +117,18 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
+	if c.allDone {
+		ret = true
+	}
 
 	return ret
 }
 
-// get tasks pool
-var once sync.Once
+var (
+	once sync.Once
+)
 
+// get tasks pool
 func (c *Coordinator) GetPool() TaskQueue {
 	if c.tasks == nil {
 		once.Do(func() {
