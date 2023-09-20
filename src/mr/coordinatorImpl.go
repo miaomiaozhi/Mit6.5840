@@ -6,39 +6,16 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
 	"sync"
+	"time"
 
 	"6.5840/logger"
 )
 
-func (c *Coordinator) pushMapTask(args *FetchTaskRequest, reply *FetchTaskReponse) error {
-	// initailize
-	reply.TaskInfo = &TaskInfo{}
-
-	reply.WoderIndex = args.WoderIndex
-	if args.WoderIndex == -1 {
-		c.globalWorkerIndex += 1
-		reply.WoderIndex = c.globalWorkerIndex
-	}
-
-	if len(c.GetPool()) == 0 {
-		reply.TaskInfo.TaskType = WaitTask
-	} else {
-		reply.TaskInfo = <-c.GetPool()
-	}
-
-	return nil
-}
-
-func (c *Coordinator) pushReduceTask(args *FetchTaskRequest, reply *FetchTaskReponse) error {
-	// initailize
-	reply.TaskInfo = &TaskInfo{}
-
-	reply.WoderIndex = args.WoderIndex
-	if args.WoderIndex == -1 {
-		c.globalWorkerIndex += 1
-		reply.WoderIndex = c.globalWorkerIndex
-	}
+func (c *Coordinator) pushMapReduceTask(args *FetchTaskRequest, reply *FetchTaskReponse) error {
+	c.globalWorkerIndex += 1
+	reply.WoderIndex = c.globalWorkerIndex
 
 	if len(c.GetPool()) == 0 {
 		reply.TaskInfo.TaskType = WaitTask
@@ -53,16 +30,15 @@ func (c *Coordinator) PushTask(args *FetchTaskRequest, reply *FetchTaskReponse) 
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	// initailize
+	reply.TaskInfo = &TaskInfo{}
+	reply.WoderIndex = args.WoderIndex
+
 	if c.allDone {
 		reply.TaskInfo.TaskType = EndTask
 		return nil
 	}
-
-	if !c.mapDone {
-		return c.pushMapTask(args, reply)
-	} else {
-		return c.pushReduceTask(args, reply)
-	}
+	return c.pushMapReduceTask(args, reply)
 }
 
 func (c *Coordinator) FinishTask(args *MapRequest, reply *MapResponse) error {
@@ -80,6 +56,16 @@ func (c *Coordinator) FinishTask(args *MapRequest, reply *MapResponse) error {
 		c.unImplMapTaskCnt -= 1
 		if c.unImplMapTaskCnt == 0 {
 			c.mapDone = true
+
+			// logger.Debugf("!!!!!!!!!!!!! generate reduce work now")
+			// generate reduce work
+			for index := 0; index < c.nReduce; index++ {
+				c.tasks <- &TaskInfo{
+					TaskType: ReduceTask,
+					FileName: strconv.Itoa(index),
+					NReduce:  c.nReduce,
+				}
+			}
 		}
 	case ReduceTask:
 		c.unImplReduceTaskCnt -= 1
@@ -119,6 +105,8 @@ func (c *Coordinator) Done() bool {
 	// Your code here.
 	if c.allDone {
 		ret = true
+		logger.Info("coordinator finish all job now")
+		time.Sleep(5 * time.Second)
 	}
 
 	return ret

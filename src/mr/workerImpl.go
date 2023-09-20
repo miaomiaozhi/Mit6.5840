@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 )
 
 const (
-	mapTmpDir = "./map"
+	mapTmpDir = "./map/"
 )
 
 func CallFetchTask() (*TaskInfo, error) {
@@ -27,8 +28,8 @@ func CallFetchTask() (*TaskInfo, error) {
 	ok := call("Coordinator.PushTask", &args, &reply)
 	if ok {
 		WorkerIndex = reply.WoderIndex
-		logger.Infof("Worker %v fetch task %v",
-			WorkerIndex, TaskMap[reply.TaskInfo.TaskType])
+		// logger.Infof("Worker %v fetch task %v",
+		// WorkerIndex, TaskMap[reply.TaskInfo.TaskType])
 		return reply.TaskInfo, nil
 	} else {
 		logger.Errorf("Worker %v call fetch task handle failed", WorkerIndex)
@@ -68,6 +69,22 @@ func getKvaInMapTask(taskInfo *TaskInfo,
 	return kva, nil
 }
 
+func openFileCreateIfNotExist(dirPath string, filePath string) (*os.File, error) {
+	// 检查文件夹是否存在
+	_, err := os.Stat(dirPath)
+	if err != nil {
+		// 文件夹不存在，创建文件夹
+		err = os.Mkdir(dirPath, 0755)
+		if err != nil {
+			logger.Errorf("create dir %v error: %v",
+				dirPath, err)
+			return nil, err
+		}
+	}
+
+	return os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+}
+
 func writeIntermediateToFile(index int, kva []KeyValue, result chan error) {
 	jsonData, err := json.Marshal(kva)
 	if err != nil {
@@ -79,10 +96,9 @@ func writeIntermediateToFile(index int, kva []KeyValue, result chan error) {
 
 	filePathPrefix := "mr-map-" + strconv.Itoa(WorkerIndex) + "-"
 	filePathPrefix = filepath.Join(mapTmpDir, filePathPrefix)
-	filePathSuffix := ".txt"
 
-	filePath := filePathPrefix + strconv.Itoa(index) + filePathSuffix
-	file, err := os.Create(filePath)
+	filePath := filePathPrefix + strconv.Itoa(index)
+	file, err := openFileCreateIfNotExist(mapTmpDir, filePath)
 	if err != nil {
 		logger.Errorf("handle map task failed, worker (%v-%v): create file error %v",
 			WorkerIndex, index, err)
@@ -102,7 +118,6 @@ func writeIntermediateToFile(index int, kva []KeyValue, result chan error) {
 
 func HandleMapTask(taskInfo *TaskInfo,
 	mapf func(string, string) []KeyValue) error {
-	logger.Infof("Worker %v Handle map task", WorkerIndex)
 	if WorkerIndex == -1 {
 		logger.Errorf("handle map task error: WorkerIndex is INVALID. taskInfo: %v",
 			*taskInfo)
@@ -135,17 +150,82 @@ func HandleMapTask(taskInfo *TaskInfo,
 		}
 	}
 
-	logger.Infof("worker %v handle map task success!", WorkerIndex)
+	// logger.Infof("worker %v handle map task success!", WorkerIndex)
 	return nil
 }
 func HandleReduceTask(taskInfo *TaskInfo,
 	reducef func(string, []string) string) error {
-	logger.Infof("Worker %v Handle reduce task", WorkerIndex)
+
+	if WorkerIndex == -1 {
+		logger.Errorf("handle reduce task error: WorkerIndex is INVALID. taskInfo: %v",
+			*taskInfo)
+		return errors.New("handle reduce task error: WorkerIndex is INVALID")
+	}
+
+	reduceNum := taskInfo.FileName
+	filePattern := filepath.Join(mapTmpDir, "mr-map-*-"+reduceNum)
+	matchedFiles, err := filepath.Glob(filePattern)
+	if err != nil {
+		logger.Errorf("Failed to match files: %v", err)
+		return err
+	}
+	// logger.Debugf("worker (%v-%v), match %v",
+	// 	WorkerIndex, reduceNum, matchedFiles)
+
+	intermediate := make([]KeyValue, 0)
+	for _, file := range matchedFiles {
+		contentByte, err := os.ReadFile(file)
+		if err != nil {
+			logger.Errorf("Failed to open file: %v", err)
+			return err
+		}
+
+		kva := make([]KeyValue, 0)
+		if err := json.Unmarshal(contentByte, &kva); err != nil {
+			logger.Errorf("failed to unmarshal kva, worker(%v-%v), err: %v",
+				WorkerIndex, reduceNum, err)
+			return err
+		}
+		intermediate = append(intermediate, kva...)
+	}
+	sort.Sort(ByKey(intermediate))
+
+	oname := "mr-out-" + reduceNum
+	dirPath := "./"
+	file, err := openFileCreateIfNotExist(dirPath, oname)
+	if err != nil {
+		logger.Errorf("Failed to open file: %v", err)
+		return err
+	}
+	defer file.Close()
+
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		key := intermediate[i].Key
+		for j < len(intermediate) && intermediate[j].Key == key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		count := reducef(key, values)
+		kv := key + " " + count + "\n"
+
+		if _, err := file.WriteString(kv); err != nil {
+			logger.Errorf("handle reduce task error, worker(%v-%v), err: %v",
+				WorkerIndex, reduceNum, err)
+			return err
+		}
+
+		i = j
+	}
+
 	return nil
 }
 
 func HandleWaitTask(taskInfo *TaskInfo) error {
-	logger.Infof("Worker %v Handle wait task", WorkerIndex)
 	time.Sleep(5 * time.Second)
 	return nil
 }
